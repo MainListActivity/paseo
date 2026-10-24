@@ -269,6 +269,38 @@ Paseo 刷新 Agent 的方式是关闭它当前的 Provider 会话，然后用当
 
 只声明你实现了的能力。如果不支持引导，请省略 `prompt.steer`；Paseo 可以改为替换当前轮次。
 
+## 允许清理空闲运行时 {#permit-idle-runtime-cleanup}
+
+Paseo 可以在可恢复的会话空闲 30 分钟后释放其运行时。要启用此功能，请在连接和会话的 `session.opened` capabilities 中声明 `session.can_stop_runtime`。没有此能力的会话会保持驻留。旧版插件不会收到新请求。
+
+在现有的 `send(input)` 处理函数中处理安全查询。请求使用 Provider 自己的会话 ID，包括同一连接服务多个会话的情况：
+
+```ts
+case "session.can_stop_runtime": {
+  try {
+    const session = sessions.get(input.sessionId);
+    if (!session) throw new Error("Session not found");
+    emit({
+      type: "session.can_stop_runtime",
+      requestId: input.requestId,
+      sessionId: input.sessionId,
+      canStop: await session.canStopRuntime(),
+    });
+  } catch (error) {
+    emit({
+      type: "request.failed",
+      requestId: input.requestId,
+      error: { message: error instanceof Error ? error.message : String(error) },
+    });
+  }
+  return;
+}
+```
+
+`canStopRuntime(): Promise<boolean>` 由你的 Provider 会话实现。只有释放运行时不会丢失后台 shell、监控任务、原生子 Agent、排队的完成报告或待处理的自主回复时，才返回 `true`。此查询不得停止或修改会话。仍有工作时返回 `false`。查询拒绝、响应无效或超时也会保留运行时。不要用 `request.completed` 响应此查询。
+
+Paseo 会检查自己管理的前台轮次、权限、排队消息和托管后代 Agent，然后在调用现有的 `session.close` 操作之前重新检查活动。肯定的安全响应允许清理，但不会请求清理。受保护的工作完成后，会重新开始 30 分钟的空闲期。保存的 Provider 持久化数据必须能恢复同一个会话。主机设置 `agents.idleRuntimeCleanup: false` 会禁用所有 Provider 的清理。
+
 ## 发布时间线条目 {#publish-timeline-items}
 
 通过 `timeline.item` 发布完整的快照。更新流式文本、运行中的工具或待办列表时，复用条目的 `id`。Paseo 会推导出实时增量，并保持正常的时间线。
