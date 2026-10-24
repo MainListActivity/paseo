@@ -46,9 +46,11 @@ test.describe("Turn collapse", () => {
       await expectComposerVisible(page);
 
       const summary = page.getByTestId("turn-summary").last().getByRole("button");
-      await expect(summary).toHaveText(/^Wrote \d+ messages, edited 1 file/);
+      await expect(summary).toHaveText(/^Wrote \d+ messages?, edited 1 file/);
+      // Text chunks that stream back to back merge into one message, so the reply holds
+      // at least the stream's last chunk.
       await expect(page.getByTestId("assistant-message").last()).toHaveText(
-        "(end of synthetic stream)",
+        /\(end of synthetic stream\)$/,
       );
       await expect.poll(() => rowsBetweenLatestSummaryAndReply(page)).toBe(0);
 
