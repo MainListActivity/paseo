@@ -1234,3 +1234,50 @@ test("config-required plugin membership is independent of enablement and other p
     await plugins.shutdown();
   }
 });
+
+test.each([true, false, "error", "wrong-session", "missing"] as const)(
+  "plugin runtime safety query: %s",
+  async (answer) => {
+    const harness = createProviderHarness({
+      capabilities:
+        answer === "missing" ? CAPABILITIES : [...CAPABILITIES, "session.can_stop_runtime"],
+      handleInput: async (input, emit) => {
+        if (input.type !== "session.can_stop_runtime") return false;
+        if (answer === "error")
+          emit({
+            type: "request.failed",
+            requestId: input.requestId,
+            error: { message: "Probe failed" },
+          });
+        else
+          emit({
+            type: "session.can_stop_runtime",
+            requestId: input.requestId,
+            sessionId: answer === "wrong-session" ? "child-1" : input.sessionId,
+            canStop: answer === true,
+          });
+        return true;
+      },
+    });
+    const registry = new PluginAgentClientRegistry(createTestLogger());
+    registry.replace([harness.registration]);
+    const client = registry.clients()[harness.registration.id]!;
+    const session = await client.createSession({ provider: harness.registration.id, cwd: "/tmp" });
+    try {
+      if (answer === "error" || answer === "wrong-session") {
+        await expect(session.canStopRuntime!()).rejects.toThrow(
+          answer === "error" ? "Probe failed" : "another session",
+        );
+      } else expect(await session.canStopRuntime!()).toBe(answer === true);
+      const requests = harness.inputs.filter((input) => input.type === "session.can_stop_runtime");
+      expect(requests).toHaveLength(answer === "missing" ? 0 : 1);
+      if (answer !== "missing")
+        expect(requests[0]).toMatchObject({
+          sessionId: harness.inputs.find((input) => input.type === "session.open")?.sessionId,
+        });
+    } finally {
+      await session.close();
+      await registry.shutdown();
+    }
+  },
+);

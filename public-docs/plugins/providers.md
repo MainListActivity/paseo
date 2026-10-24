@@ -306,6 +306,49 @@ turn or finish as a side effect with a `completed` prompt result.
 Advertise only capabilities you implement. If steering is unsupported, omit `prompt.steer`; Paseo
 can replace the active turn instead.
 
+## Permit idle runtime cleanup
+
+Paseo can release an idle resumable session after 30 minutes. Opt in by advertising
+`session.can_stop_runtime` on the connection and the session's `session.opened` capabilities.
+Without this capability your sessions stay resident. Older plugins receive no new request.
+
+Handle the safety query in your existing `send(input)` handler. It addresses the provider's own
+session ID, including when one connection serves several sessions:
+
+```ts
+case "session.can_stop_runtime": {
+  try {
+    const session = sessions.get(input.sessionId);
+    if (!session) throw new Error("Session not found");
+    emit({
+      type: "session.can_stop_runtime",
+      requestId: input.requestId,
+      sessionId: input.sessionId,
+      canStop: await session.canStopRuntime(),
+    });
+  } catch (error) {
+    emit({
+      type: "request.failed",
+      requestId: input.requestId,
+      error: { message: error instanceof Error ? error.message : String(error) },
+    });
+  }
+  return;
+}
+```
+
+`canStopRuntime(): Promise<boolean>` belongs to your provider's session implementation. Return
+`true` only when releasing the runtime loses no background shells, monitors, native children,
+queued completion reports, or pending autonomous replies. This query must not stop or mutate the
+session. Return `false` while work remains. A rejected query, invalid response, or timeout also
+keeps the runtime alive. Never respond with `request.completed` for this query.
+
+Paseo checks its own foreground turns, permissions, queued messages, and managed descendants,
+then rechecks activity before calling the existing `session.close` operation. A positive safety
+response permits collection; it does not request it. After protected work finishes, a fresh
+30-minute idle period starts. The saved provider persistence must resume the same conversation.
+The host setting `agents.idleRuntimeCleanup: false` disables collection for every provider.
+
 ## Publish timeline items
 
 Publish complete snapshots through `timeline.item`. Reuse an item `id` when updating streamed text,

@@ -1,3 +1,4 @@
+import { ensureAgentLoaded } from "./agent-loading.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
@@ -758,6 +759,8 @@ export class AgentManager {
   private readonly agentRegistrationTasks = new Set<Promise<void>>();
   private readonly inFlightAgentCloses = new Map<string, Promise<void>>();
   private readonly reloadedSessionCloses = new WeakMap<AgentSession, Promise<void>>();
+  private readonly runtimeProtectedAt = new WeakMap<AgentSession, { at: number; safe: boolean }>();
+  private readonly collectingRuntimes = new Set<string>();
   private readonly lifecycleMutationTails = new Map<string, Promise<void>>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
@@ -1747,6 +1750,134 @@ export class AgentManager {
     });
   }
 
+  /** Release only resumable runtimes whose providers positively permit shutdown. */
+  async collectIdleAgents(
+    options: {
+      now?: Date;
+      isProtected?: (agentId: string) => boolean;
+    } = {},
+  ): Promise<{
+    collected: Array<{ agentId: string; provider: AgentProvider; sessionId: string }>;
+    failures: Array<{ agentId: string; error: unknown }>;
+  }> {
+    const result: Awaited<ReturnType<AgentManager["collectIdleAgents"]>> = {
+      collected: [],
+      failures: [],
+    };
+    if (!this.registry) return result;
+    const now = options.now?.getTime() ?? Date.now();
+    const cutoff = now - 30 * 60_000;
+    const daemonAllows = (agent: LiveManagedAgent, inCollection = false): boolean =>
+      agent.lifecycle === "idle" &&
+      !agent.internal &&
+      agent.activeForegroundTurnId === null &&
+      !this.runs.hasRun(agent.id) &&
+      !agent.pendingReplacement &&
+      agent.pendingPermissions.size === 0 &&
+      agent.inFlightPermissionResponses.size === 0 &&
+      (inCollection || !this.lifecycleMutationTails.has(agent.id)) &&
+      !this.foregroundMutationTails.has(agent.id) &&
+      !this.sessionEventTails.has(agent.id) &&
+      !options.isProtected?.(agent.id) &&
+      !this.providerSubagents.list(agent.id).some((child) => child.status === "running");
+    const descendants = (root: LiveManagedAgent): LiveManagedAgent[] => {
+      const found = new Map([[root.id, root]]);
+      for (const parent of found.values()) {
+        for (const child of this.agents.values()) {
+          if (getParentAgentIdFromLabels(child.labels) === parent.id) found.set(child.id, child);
+        }
+      }
+      return [...found.values()];
+    };
+    const candidates = [...this.agents.values()];
+    for (const agent of candidates) {
+      if (!agent.persistence?.sessionId) continue;
+      if (!daemonAllows(agent)) {
+        this.runtimeProtectedAt.set(agent.session, { at: now, safe: false });
+        continue;
+      }
+      const family = descendants(agent);
+      const versions = family.map((member) => ({ member, updatedAt: member.updatedAt }));
+      try {
+        const safe = await this.runtimeFamilyCanStop(family, daemonAllows);
+        if (!safe) {
+          this.runtimeProtectedAt.set(agent.session, { at: now, safe: false });
+          this.logger.debug(
+            { agentId: agent.id },
+            "Idle runtime retained: provider or descendant owns work",
+          );
+          continue;
+        }
+        const lastProbe = this.runtimeProtectedAt.get(agent.session);
+        if (lastProbe && !lastProbe.safe)
+          this.runtimeProtectedAt.set(agent.session, { at: now, safe: true });
+        if (
+          Math.max(agent.updatedAt.getTime(), this.runtimeProtectedAt.get(agent.session)?.at ?? 0) >
+          cutoff
+        )
+          continue;
+        const stillEligible = () => {
+          const currentFamily = descendants(agent);
+          return (
+            currentFamily.length === versions.length &&
+            versions.every(
+              ({ member, updatedAt }) =>
+                this.agents.get(member.id) === member &&
+                member.updatedAt === updatedAt &&
+                daemonAllows(member, member === agent),
+            )
+          );
+        };
+        // The lifecycle lane is the loader's close barrier. Recheck after draining queued
+        // events, immediately before calling close; prompt admission below uses the same barrier.
+        const closed = await this.runLifecycleMutation(agent.id, () =>
+          this.closeAgentRuntime(agent.id, () => {
+            if (!stillEligible()) return false;
+            this.collectingRuntimes.add(agent.id);
+            return true;
+          }),
+        );
+        if (closed) {
+          const entry = {
+            agentId: agent.id,
+            provider: agent.provider,
+            sessionId: agent.persistence.sessionId,
+          };
+          result.collected.push(entry);
+          this.logger.info(entry, "Collected idle agent runtime");
+        }
+      } catch (error) {
+        this.runtimeProtectedAt.set(agent.session, { at: now, safe: false });
+        result.failures.push({ agentId: agent.id, error });
+        this.logger.warn(
+          { agentId: agent.id, err: error },
+          "Idle runtime cleanup failed; retaining ownership",
+        );
+      } finally {
+        this.collectingRuntimes.delete(agent.id);
+      }
+    }
+    return result;
+  }
+
+  private async runtimeFamilyCanStop(
+    family: LiveManagedAgent[],
+    daemonAllows: (agent: LiveManagedAgent) => boolean,
+  ): Promise<boolean> {
+    for (const member of family) {
+      if (!daemonAllows(member) || !member.session.canStopRuntime) return false;
+      if (
+        !(await withTimeout(
+          member.session.canStopRuntime(),
+          10_000,
+          `Runtime safety probe timed out for ${member.id}`,
+        ))
+      )
+        return false;
+    }
+    return true;
+  }
+
   closeAgent(agentId: string): Promise<void> {
     const existing = this.inFlightAgentCloses.get(agentId);
     if (existing) {
@@ -1767,7 +1898,7 @@ export class AgentManager {
     return close;
   }
 
-  private async closeAgentRuntime(agentId: string): Promise<void> {
+  private async closeAgentRuntime(agentId: string, canClose?: () => boolean): Promise<boolean> {
     const agent = this.requireAgent(agentId);
     this.logger.trace(
       {
@@ -1782,6 +1913,7 @@ export class AgentManager {
       "agent.manager.close.start",
     );
     await this.drainSessionEvents(agentId);
+    if (canClose && !canClose()) return false;
     // Retain ownership until shutdown succeeds. A failed close may still own a
     // native writer, so publishing a resumable closed snapshot would orphan it.
     await agent.session.close();
@@ -1807,6 +1939,7 @@ export class AgentManager {
     if (persistError !== undefined) {
       throw persistError;
     }
+    return true;
   }
 
   private cancelRunningProviderSubagents(parentAgentId: string): void {
@@ -2459,7 +2592,19 @@ export class AgentManager {
    * emitted by the handler flow through dispatchStream so they persist and
    * broadcast like normal timeline events.
    */
-  tryRunOutOfBand(agentId: string, prompt: AgentPromptInput, options?: AgentRunOptions): boolean {
+  async tryRunOutOfBand(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+  ): Promise<boolean> {
+    if (this.collectingRuntimes.has(agentId) || !this.agents.has(agentId)) {
+      await this.waitForAgentClose(agentId);
+      await ensureAgentLoaded(agentId, {
+        agentManager: this,
+        agentStorage: this.requireRegistry(),
+        logger: this.logger,
+      });
+    }
     const agent = this.requireSessionAgent(agentId);
     // Providers parse slash commands from the raw text, so a command another agent sent
     // must reach them without its sender envelope.
@@ -2470,6 +2615,7 @@ export class AgentManager {
     if (!handler) {
       return false;
     }
+    this.touchUpdatedAt(agent);
     if (options?.clientMessageId) {
       this.recordSubmittedPrompt(agent, prompt, options.clientMessageId, "accepted");
       this.emitState(agent);
@@ -2489,7 +2635,7 @@ export class AgentManager {
       }
       this.dispatchStream(agent.id, event, { timestamp: new Date().toISOString() });
     };
-    void (async () => {
+    void this.runForegroundMutation(agentId, async () => {
       try {
         await handler.run({ emit: dispatch });
       } catch (error) {
@@ -2500,7 +2646,7 @@ export class AgentManager {
           item: { type: "assistant_message", text: `[Error] ${text}` },
         });
       }
-    })();
+    });
     return true;
   }
 
@@ -2584,11 +2730,27 @@ export class AgentManager {
     }
   }
 
+  private async *streamAfterRuntimeCollection(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+  ): AsyncGenerator<AgentStreamEvent> {
+    await this.waitForAgentClose(agentId);
+    await ensureAgentLoaded(agentId, {
+      agentManager: this,
+      agentStorage: this.requireRegistry(),
+      logger: this.logger,
+    });
+    yield* this.streamAgent(agentId, prompt, options);
+  }
+
   streamAgent(
     agentId: string,
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): AsyncGenerator<AgentStreamEvent> {
+    if (this.collectingRuntimes.has(agentId) || (!this.agents.has(agentId) && this.registry))
+      return this.streamAfterRuntimeCollection(agentId, prompt, options);
     const existingAgent = this.requireSessionAgent(agentId);
     this.logger.trace(
       {
