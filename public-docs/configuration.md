@@ -86,8 +86,8 @@ See [Providers](/docs/providers) for the mental model and [Supported providers](
 
 ## Idle runtimes
 
-Paseo releases resumable idle agent processes after 30 minutes when the provider confirms that no
-background work needs the runtime. Your next prompt resumes the same conversation. Disable this
+Paseo releases resumable idle agent processes after one hour when its daemon baseline allows
+cleanup and any implemented provider check agrees. Your next prompt resumes the same conversation. Disable this
 for the entire host with:
 
 ```json
@@ -95,7 +95,8 @@ for the entire host with:
 ```
 
 This setting defaults to `true` and requires a daemon restart to change. There is no per-agent
-setting. Providers without a runtime safety check stay resident.
+setting. Providers without a runtime safety check use the same daemon baseline and one-hour idle
+period. Active work, descendants and pending finish notifications prevent cleanup.
 
 ## Worktrees
 

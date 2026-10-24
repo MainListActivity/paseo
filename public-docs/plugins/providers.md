@@ -308,9 +308,10 @@ can replace the active turn instead.
 
 ## Permit idle runtime cleanup
 
-Paseo can release an idle resumable session after 30 minutes. Opt in by advertising
-`session.can_stop_runtime` on the connection and the session's `session.opened` capabilities.
-Without this capability your sessions stay resident. Older plugins receive no new request.
+Paseo can release an idle resumable session after one hour when its daemon baseline allows cleanup.
+Add a provider-owned veto by advertising `session.can_stop_runtime` on the connection and the
+session's `session.opened` capabilities. Without this capability, the same baseline and one-hour
+idle period apply, and the plugin receives no safety request.
 
 Handle the safety query in your existing `send(input)` handler. It addresses the provider's own
 session ID, including when one connection serves several sessions:
@@ -343,10 +344,12 @@ queued completion reports, or pending autonomous replies. This query must not st
 session. Return `false` while work remains. A rejected query, invalid response, or timeout also
 keeps the runtime alive. Never respond with `request.completed` for this query.
 
-Paseo checks its own foreground turns, permissions, queued messages, and managed descendants,
-then rechecks activity before calling the existing `session.close` operation. A positive safety
-response permits collection; it does not request it. After protected work finishes, a fresh
-30-minute idle period starts. The saved provider persistence must resume the same conversation.
+Paseo always checks foreground work, permissions, queued deliveries, lifecycle operations,
+working managed/native descendants, and outstanding local or remote finish subscriptions for the
+caller. Subscription protection lasts through registration, recovery and notification dispatch
+acknowledgment. A positive provider response never overrides these blockers. Paseo rechecks
+activity before the existing `session.close` operation. After protected work finishes, a fresh
+one-hour idle period starts. The saved provider persistence must resume the same conversation.
 The host setting `agents.idleRuntimeCleanup: false` disables collection for every provider.
 
 ## Publish timeline items

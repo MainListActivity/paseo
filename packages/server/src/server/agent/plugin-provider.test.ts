@@ -1,3 +1,8 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AgentStorage } from "./agent-storage.js";
+import { createIdleRuntimeCleanup } from "./idle-runtime-cleanup/index.js";
 import { relative } from "node:path";
 import type {
   ProviderConnection,
@@ -1268,7 +1273,8 @@ test.each([true, false, "error", "wrong-session", "missing"] as const)(
         await expect(session.canStopRuntime!()).rejects.toThrow(
           answer === "error" ? "Probe failed" : "another session",
         );
-      } else expect(await session.canStopRuntime!()).toBe(answer === true);
+      } else if (answer === "missing") expect(session.canStopRuntime).toBeUndefined();
+      else expect(await session.canStopRuntime!()).toBe(answer === true);
       const requests = harness.inputs.filter((input) => input.type === "session.can_stop_runtime");
       expect(requests).toHaveLength(answer === "missing" ? 0 : 1);
       if (answer !== "missing")
@@ -1281,3 +1287,37 @@ test.each([true, false, "error", "wrong-session", "missing"] as const)(
     }
   },
 );
+
+test("plugin without a runtime safety capability uses baseline collection without a query", async () => {
+  const home = await mkdtemp(join(tmpdir(), "plugin-baseline-cleanup-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(join(home, "agents"), logger);
+  const harness = createProviderHarness();
+  const registry = new PluginAgentClientRegistry(logger);
+  registry.replace([harness.registration]);
+  const manager = new AgentManager({ clients: registry.clients(), registry: storage, logger });
+  const agent = await manager.createAgent(
+    { provider: harness.registration.id, cwd: home },
+    undefined,
+    { workspaceId: undefined },
+  );
+  const cleanup = createIdleRuntimeCleanup({
+    enabled: true,
+    logger,
+    runtimes: () => manager.getRuntimeCleanupCandidates(),
+    now: () => agent.updatedAt.getTime() + 60 * 60_000,
+    schedule: () => () => {},
+  });
+  try {
+    expect(agent.session?.canStopRuntime).toBeUndefined();
+    expect((await cleanup.sweep()).collected).toHaveLength(1);
+    expect(manager.getAgent(agent.id)).toBeNull();
+    expect(harness.inputs.filter((input) => input.type === "session.can_stop_runtime")).toEqual([]);
+  } finally {
+    await cleanup.close();
+    await Promise.all(manager.listAgents().map((item) => manager.closeAgent(item.id)));
+    await registry.shutdown();
+    await storage.flush();
+    await rm(home, { recursive: true, force: true });
+  }
+});

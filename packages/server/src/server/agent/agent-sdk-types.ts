@@ -695,7 +695,8 @@ export interface AgentSession {
    */
   interrupt(): Promise<void>;
   /** True only when releasing this runtime loses no background work or pending replies.
-   * Missing methods and rejected probes keep the runtime resident. */
+   * An optional additional veto: missing methods use daemon baseline eligibility;
+   * implemented checks that reject or return false keep the runtime resident. */
   canStopRuntime?(): Promise<boolean>;
   /** Release live runtime resources without archiving or deleting the durable native session. */
   close(): Promise<void>;

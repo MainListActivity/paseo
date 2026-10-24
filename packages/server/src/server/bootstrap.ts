@@ -1,4 +1,4 @@
-import { startIdleRuntimeCleanup } from "./agent/idle-runtime-cleanup.js";
+import { createIdleRuntimeCleanup } from "./agent/idle-runtime-cleanup/index.js";
 import {
   createFinishSubscriptions,
   createFinishObservation,
@@ -1400,14 +1400,6 @@ export async function createPaseoDaemon(
     archiveWorkspace: archiveScheduleWorkspaceExternal,
   });
   await scheduleService.start();
-  const stopIdleRuntimeCleanup = startIdleRuntimeCleanup({
-    enabled: config.idleRuntimeCleanup !== false,
-    collect: () =>
-      agentManager.collectIdleAgents({
-        isProtected: (agentId) => wsServer?.agentMessages.hasPending(agentId) ?? false,
-      }),
-    onError: (error) => logger.warn({ err: error }, "Idle runtime sweep failed"),
-  });
 
   agentManager.setAgentArchivedCallback(async (agentId) => {
     try {
@@ -1454,6 +1446,15 @@ export async function createPaseoDaemon(
         return wsServer.toolHosts();
       },
     }),
+  });
+
+  const idleRuntimeCleanup = createIdleRuntimeCleanup({
+    enabled: config.idleRuntimeCleanup !== false,
+    runtimes: () => agentManager.getRuntimeCleanupCandidates(),
+    isProtected: (agentId) =>
+      finishSubscriptions.hasPendingForCaller(agentId) ||
+      (wsServer?.agentMessages.hasPending(agentId) ?? false),
+    logger,
   });
 
   const createAgentToolHostDependencies = (
@@ -1918,7 +1919,7 @@ export async function createPaseoDaemon(
     await hubRelationships.stop();
     workspaceReconciliation.dispose();
     scriptHealthMonitor.stop();
-    await stopIdleRuntimeCleanup();
+    await idleRuntimeCleanup.close();
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     await finishSubscriptions.close();

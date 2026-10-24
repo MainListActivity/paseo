@@ -84,13 +84,13 @@ Agent Provider，包括 Paseo 自带的一等 Provider 和你在 `agents.provide
 
 ## 空闲运行时 {#idle-runtimes}
 
-当 Provider 确认没有后台工作需要运行时时，Paseo 会在可恢复的 Agent 空闲 30 分钟后释放其进程。你的下一条提示词会恢复同一个会话。要为整个主机禁用此功能，请设置：
+当 daemon 的基础条件允许清理，且 Provider 已实现的安全检查也允许时，Paseo 会在可恢复的 Agent 空闲一小时后释放其进程。你的下一条提示词会恢复同一个会话。要为整个主机禁用此功能，请设置：
 
 ```json
 { "agents": { "idleRuntimeCleanup": false } }
 ```
 
-此设置默认为 `true`，更改后需要重启 daemon。没有单个 Agent 的设置。不提供运行时安全检查的 Provider 会保持驻留。
+此设置默认为 `true`，更改后需要重启 daemon。没有单个 Agent 的设置。不提供运行时安全检查的 Provider 使用相同的 daemon 基础条件和一小时空闲期。活动中的工作、后代 Agent 和待发送的完成通知都会阻止清理。
 
 ## worktree {#worktrees}
 

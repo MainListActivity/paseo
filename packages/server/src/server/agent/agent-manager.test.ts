@@ -1,4 +1,4 @@
-import { startIdleRuntimeCleanup } from "./idle-runtime-cleanup.js";
+import { createIdleRuntimeCleanup } from "./idle-runtime-cleanup/index.js";
 import {
   prepareAgentMessage,
   formatAgentMessage,
@@ -10008,7 +10008,7 @@ test("closeAgent persists one final closed snapshot", async () => {
   }
 });
 
-test("idle runtime cleanup requires provider permission and resumes the saved conversation", async () => {
+test("idle runtime cleanup honors a provider veto and resumes the saved conversation", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-idle-cleanup-"));
   const storage = new AgentStorage(join(workdir, "agents"), logger);
   let safe = false;
@@ -10020,16 +10020,17 @@ test("idle runtime cleanup requires provider permission and resumes the saved co
     }
   })();
   const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  const collect = runtimeCleanup(manager);
   try {
     const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
       workspaceId: undefined,
     });
-    const now = new Date(Date.now() + 31 * 60_000);
-    expect(await manager.collectIdleAgents({ now })).toEqual({ collected: [], failures: [] });
+    const now = new Date(Date.now() + 61 * 60_000);
+    expect(await collect({ now })).toEqual({ collected: [], failures: [] });
     safe = true;
-    expect(await manager.collectIdleAgents({ now })).toEqual({ collected: [], failures: [] });
-    const later = new Date(now.getTime() + 31 * 60_000);
-    expect((await manager.collectIdleAgents({ now: later })).collected).toEqual([
+    expect(await collect({ now })).toEqual({ collected: [], failures: [] });
+    const later = new Date(now.getTime() + 61 * 60_000);
+    expect((await collect({ now: later })).collected).toEqual([
       { agentId: agent.id, provider: "codex", sessionId: agent.persistence?.sessionId },
     ]);
     expect(manager.getAgent(agent.id)).toBeNull();
@@ -12125,6 +12126,25 @@ test("reads the last durable assistant response without loading a stored-only ch
   expect(manager.getAgent("stored-child")).toBeNull();
 });
 
+function runtimeCleanup(manager: AgentManager) {
+  let now = Date.now();
+  let protectedCaller = (_agentId: string) => false;
+  const cleanup = createIdleRuntimeCleanup({
+    enabled: true,
+    runtimes: () => manager.getRuntimeCleanupCandidates(),
+    logger,
+    now: () => now,
+    isProtected: (agentId) => protectedCaller(agentId),
+    schedule: () => () => {},
+  });
+  onTestFinished(() => cleanup.close());
+  return (options: { now: Date; isProtected?: (agentId: string) => boolean }) => {
+    now = options.now.getTime();
+    protectedCaller = options.isProtected ?? (() => false);
+    return cleanup.sweep();
+  };
+}
+
 function idleCleanupHarness() {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-idle-protection-"));
   const storage = new AgentStorage(join(workdir, "agents"), logger);
@@ -12182,6 +12202,7 @@ function idleCleanupHarness() {
   });
   return {
     commands,
+    sweep: runtimeCleanup(manager),
     manager,
     storage,
     sessions,
@@ -12203,35 +12224,6 @@ function idleCleanupHarness() {
   };
 }
 
-test.each(["missing", "error"])("idle cleanup retains %s safety probes", async (kind) => {
-  const h = idleCleanupHarness();
-  const agent = await h.create();
-  if (kind === "missing") delete h.sessions[0]!.canStopRuntime;
-  else
-    h.probes[0] = async () => {
-      throw new Error("probe failed");
-    };
-  const result = await h.manager.collectIdleAgents({ now: h.later(31) });
-  expect(result.collected).toEqual([]);
-  expect(result.failures).toHaveLength(kind === "error" ? 1 : 0);
-  expect(h.closes).toBe(0);
-  expect(h.manager.getAgent(agent.id)?.lifecycle).toBe("idle");
-});
-
-test("idle cleanup starts a fresh idle period when background work ends between sweeps", async () => {
-  const h = idleCleanupHarness();
-  await h.create();
-  h.probes[0] = async () => false;
-  await h.manager.collectIdleAgents({ now: h.later(31) });
-  await h.manager.collectIdleAgents({ now: h.later(59) });
-  h.probes[0] = async () => true;
-  await h.manager.collectIdleAgents({ now: h.later(60) });
-  expect(h.closes).toBe(0);
-  await h.manager.collectIdleAgents({ now: h.later(89) });
-  expect(h.closes).toBe(0);
-  expect((await h.manager.collectIdleAgents({ now: h.later(91) })).collected).toHaveLength(1);
-});
-
 test("idle cleanup rechecks new prompt activity after an asynchronous safety probe", async () => {
   const h = idleCleanupHarness();
   const agent = await h.create();
@@ -12241,7 +12233,7 @@ test("idle cleanup rechecks new prompt activity after an asynchronous safety pro
     entered.resolve();
     return probe.promise;
   };
-  const sweep = h.manager.collectIdleAgents({ now: h.later(31) });
+  const sweep = h.sweep({ now: h.later(61) });
   await entered.promise;
   await h.manager.runAgent(agent.id, "arrived during safety query");
   probe.resolve(true);
@@ -12255,7 +12247,7 @@ test("idle cleanup retains a parent whose idle managed child owns background wor
   await h.create({ [PARENT_AGENT_ID_LABEL]: parent.id });
   h.probes[0] = async () => true;
   h.probes[1] = async () => false;
-  expect((await h.manager.collectIdleAgents({ now: h.later(31) })).collected).toEqual([]);
+  expect((await h.sweep({ now: h.later(61) })).collected).toEqual([]);
   expect(h.closes).toBe(0);
 });
 
@@ -12267,9 +12259,7 @@ test("idle cleanup rechecks queued deliveries admitted during the safety probe",
     queued = true;
     return true;
   };
-  expect(
-    (await h.manager.collectIdleAgents({ now: h.later(31), isProtected: () => queued })).collected,
-  ).toEqual([]);
+  expect((await h.sweep({ now: h.later(61), isProtected: () => queued })).collected).toEqual([]);
   expect(h.closes).toBe(0);
 });
 
@@ -12279,7 +12269,7 @@ test("a prompt racing idle cleanup waits for close and resumes exactly once", as
   h.probes[0] = async () => true;
   const gate = deferred<void>();
   h.holdClose(gate.promise);
-  const sweep = h.manager.collectIdleAgents({ now: h.later(31) });
+  const sweep = h.sweep({ now: h.later(61) });
   await h.closeEntered.promise;
   const run = h.manager.runAgent(agent.id, "arrived while closing");
   gate.resolve();
@@ -12296,7 +12286,7 @@ test("an out-of-band command racing idle cleanup waits for the resumed runtime",
   h.probes[0] = async () => true;
   const gate = deferred<void>();
   h.holdClose(gate.promise);
-  const sweep = h.manager.collectIdleAgents({ now: h.later(31) });
+  const sweep = h.sweep({ now: h.later(61) });
   await h.closeEntered.promise;
   const command = startAgentRun(h.manager, agent.id, "/maintenance", logger);
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -12308,37 +12298,3 @@ test("an out-of-band command racing idle cleanup waits for the resumed runtime",
   expect(h.commands).toEqual(["/maintenance"]);
   expect(h.prompts).toEqual([]);
 });
-
-test.each([false, true])(
-  "host idleRuntimeCleanup=%s controls actual sweep invocation",
-  async (enabled) => {
-    const h = idleCleanupHarness();
-    await h.create();
-    let probes = 0;
-    h.probes[0] = async () => {
-      probes++;
-      return true;
-    };
-    let tick!: () => void;
-    let canceled = false;
-    const stop = startIdleRuntimeCleanup({
-      enabled,
-      collect: () => h.manager.collectIdleAgents({ now: h.later(31) }),
-      onError: (error) => {
-        throw error;
-      },
-      schedule: (callback, intervalMs) => {
-        expect(intervalMs).toBe(60_000);
-        tick = callback;
-        return () => {
-          canceled = true;
-        };
-      },
-    });
-    tick();
-    await stop();
-    expect(probes).toBe(enabled ? 1 : 0);
-    expect(h.closes).toBe(enabled ? 1 : 0);
-    expect(canceled).toBe(true);
-  },
-);

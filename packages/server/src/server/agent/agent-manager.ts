@@ -1,3 +1,4 @@
+import type { RuntimeCleanupCandidate } from "./idle-runtime-cleanup/index.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
@@ -759,7 +760,7 @@ export class AgentManager {
   private readonly agentRegistrationTasks = new Set<Promise<void>>();
   private readonly inFlightAgentCloses = new Map<string, Promise<void>>();
   private readonly reloadedSessionCloses = new WeakMap<AgentSession, Promise<void>>();
-  private readonly runtimeProtectedAt = new WeakMap<AgentSession, { at: number; safe: boolean }>();
+  private readonly runtimeCleanupIdentities = new WeakMap<AgentSession, object>();
   private readonly collectingRuntimes = new Set<string>();
   private readonly lifecycleMutationTails = new Map<string, Promise<void>>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
@@ -1750,24 +1751,50 @@ export class AgentManager {
     });
   }
 
-  /** Release only resumable runtimes whose providers positively permit shutdown. */
-  async collectIdleAgents(
-    options: {
-      now?: Date;
-      isProtected?: (agentId: string) => boolean;
-    } = {},
-  ): Promise<{
-    collected: Array<{ agentId: string; provider: AgentProvider; sessionId: string }>;
-    failures: Array<{ agentId: string; error: unknown }>;
-  }> {
-    const result: Awaited<ReturnType<AgentManager["collectIdleAgents"]>> = {
-      collected: [],
-      failures: [],
-    };
-    if (!this.registry) return result;
-    const now = options.now?.getTime() ?? Date.now();
-    const cutoff = now - 30 * 60_000;
-    const daemonAllows = (agent: LiveManagedAgent, inCollection = false): boolean =>
+  /** Capture runtime capabilities without handing lifecycle ownership to the collector. */
+  getRuntimeCleanupCandidates(): RuntimeCleanupCandidate[] {
+    if (!this.registry) return [];
+    const candidates: RuntimeCleanupCandidate[] = [];
+    for (const agent of this.agents.values()) {
+      const updatedAt = agent.updatedAt;
+      let identity = this.runtimeCleanupIdentities.get(agent.session);
+      if (!identity) {
+        identity = Object.freeze({});
+        this.runtimeCleanupIdentities.set(agent.session, identity);
+      }
+      const isEligible = () =>
+        this.agents.get(agent.id) === agent &&
+        agent.updatedAt === updatedAt &&
+        this.runtimeHasNoPendingWork(agent);
+      candidates.push({
+        identity,
+        agentId: agent.id,
+        parentAgentId: getParentAgentIdFromLabels(agent.labels) ?? undefined,
+        provider: agent.provider,
+        sessionId: agent.persistence?.sessionId ?? null,
+        lastActivityAt: updatedAt.getTime(),
+        isEligible,
+        canStopRuntime: agent.session.canStopRuntime?.bind(agent.session),
+        closeIfEligible: async (revalidate) => {
+          if (!agent.persistence?.sessionId) return false;
+          // Block prompt admission before entering the close lane. A skipped close also
+          // releases this barrier, so the waiting prompt keeps the existing runtime.
+          this.collectingRuntimes.add(agent.id);
+          try {
+            return await this.runLifecycleMutation(agent.id, () =>
+              this.closeAgentRuntime(agent.id, () => isEligible() && revalidate()),
+            );
+          } finally {
+            this.collectingRuntimes.delete(agent.id);
+          }
+        },
+      });
+    }
+    return candidates;
+  }
+
+  private runtimeHasNoPendingWork(agent: LiveManagedAgent): boolean {
+    return (
       agent.lifecycle === "idle" &&
       !agent.internal &&
       agent.activeForegroundTurnId === null &&
@@ -1775,107 +1802,11 @@ export class AgentManager {
       !agent.pendingReplacement &&
       agent.pendingPermissions.size === 0 &&
       agent.inFlightPermissionResponses.size === 0 &&
-      (inCollection || !this.lifecycleMutationTails.has(agent.id)) &&
+      (this.collectingRuntimes.has(agent.id) || !this.lifecycleMutationTails.has(agent.id)) &&
       !this.foregroundMutationTails.has(agent.id) &&
       !this.sessionEventTails.has(agent.id) &&
-      !options.isProtected?.(agent.id) &&
-      !this.providerSubagents.list(agent.id).some((child) => child.status === "running");
-    const descendants = (root: LiveManagedAgent): LiveManagedAgent[] => {
-      const found = new Map([[root.id, root]]);
-      for (const parent of found.values()) {
-        for (const child of this.agents.values()) {
-          if (getParentAgentIdFromLabels(child.labels) === parent.id) found.set(child.id, child);
-        }
-      }
-      return [...found.values()];
-    };
-    const candidates = [...this.agents.values()];
-    for (const agent of candidates) {
-      if (!agent.persistence?.sessionId) continue;
-      if (!daemonAllows(agent)) {
-        this.runtimeProtectedAt.set(agent.session, { at: now, safe: false });
-        continue;
-      }
-      const family = descendants(agent);
-      const versions = family.map((member) => ({ member, updatedAt: member.updatedAt }));
-      try {
-        const safe = await this.runtimeFamilyCanStop(family, daemonAllows);
-        if (!safe) {
-          this.runtimeProtectedAt.set(agent.session, { at: now, safe: false });
-          this.logger.debug(
-            { agentId: agent.id },
-            "Idle runtime retained: provider or descendant owns work",
-          );
-          continue;
-        }
-        const lastProbe = this.runtimeProtectedAt.get(agent.session);
-        if (lastProbe && !lastProbe.safe)
-          this.runtimeProtectedAt.set(agent.session, { at: now, safe: true });
-        if (
-          Math.max(agent.updatedAt.getTime(), this.runtimeProtectedAt.get(agent.session)?.at ?? 0) >
-          cutoff
-        )
-          continue;
-        const stillEligible = () => {
-          const currentFamily = descendants(agent);
-          return (
-            currentFamily.length === versions.length &&
-            versions.every(
-              ({ member, updatedAt }) =>
-                this.agents.get(member.id) === member &&
-                member.updatedAt === updatedAt &&
-                daemonAllows(member, member === agent),
-            )
-          );
-        };
-        // The lifecycle lane is the loader's close barrier. Recheck after draining queued
-        // events, immediately before calling close; prompt admission below uses the same barrier.
-        const closed = await this.runLifecycleMutation(agent.id, () =>
-          this.closeAgentRuntime(agent.id, () => {
-            if (!stillEligible()) return false;
-            this.collectingRuntimes.add(agent.id);
-            return true;
-          }),
-        );
-        if (closed) {
-          const entry = {
-            agentId: agent.id,
-            provider: agent.provider,
-            sessionId: agent.persistence.sessionId,
-          };
-          result.collected.push(entry);
-          this.logger.info(entry, "Collected idle agent runtime");
-        }
-      } catch (error) {
-        this.runtimeProtectedAt.set(agent.session, { at: now, safe: false });
-        result.failures.push({ agentId: agent.id, error });
-        this.logger.warn(
-          { agentId: agent.id, err: error },
-          "Idle runtime cleanup failed; retaining ownership",
-        );
-      } finally {
-        this.collectingRuntimes.delete(agent.id);
-      }
-    }
-    return result;
-  }
-
-  private async runtimeFamilyCanStop(
-    family: LiveManagedAgent[],
-    daemonAllows: (agent: LiveManagedAgent) => boolean,
-  ): Promise<boolean> {
-    for (const member of family) {
-      if (!daemonAllows(member) || !member.session.canStopRuntime) return false;
-      if (
-        !(await withTimeout(
-          member.session.canStopRuntime(),
-          10_000,
-          `Runtime safety probe timed out for ${member.id}`,
-        ))
-      )
-        return false;
-    }
-    return true;
+      !this.providerSubagents.list(agent.id).some((child) => child.status === "running")
+    );
   }
 
   closeAgent(agentId: string): Promise<void> {

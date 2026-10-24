@@ -1239,8 +1239,9 @@ class PluginAgentSession implements AgentSession {
     for (const event of this.history) yield event;
   }
 
-  canStopRuntime(): Promise<boolean> {
-    return this.bridge.canStopRuntime();
+  get canStopRuntime(): (() => Promise<boolean>) | undefined {
+    if (!this.bridge.negotiatedCapabilities.includes("session.can_stop_runtime")) return undefined;
+    return () => this.bridge.canStopRuntime();
   }
 
   async getRuntimeInfo() {

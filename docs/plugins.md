@@ -498,7 +498,7 @@ Validate and apply it inside the provider; core does not know your option shape.
 See [provider options](custom-providers.md#provider-options) for configuration and
 merge semantics.
 
-Providers opt in to idle runtime collection through the per-session
+Providers add an optional veto to daemon baseline cleanup through the per-session
 [runtime safety query](../public-docs/plugins/providers.md#permit-idle-runtime-cleanup).
 The daemon calls the same `AgentSession.canStopRuntime()` interface for built-ins and plugins;
 the plugin bridge transports that query through the existing provider request/event protocol.
