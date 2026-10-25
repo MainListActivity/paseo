@@ -752,3 +752,14 @@ Existing plugin authors should follow the standalone [v0.8 runtime-entry migrati
 See `plugin-examples/local-plugin` for a native surface, `plugin-examples/linear` for a complete
 attachment-source example, `plugin-examples/timeline-items` for timeline projection, and
 `plugin-examples/catppuccin` for a theme.
+
+## Replace host usage
+
+A trusted plugin may register a surface with id `usage` to replace the host's usage modal,
+settings usage section, and agent usage details. Agent details supply `params.agentId`;
+without it the surface renders global usage. It receives the installation's RPC, query,
+navigation and theme context. The built-in pinned quota summary is suppressed for this host.
+Exactly one replacement is allowed per host; conflicting replacements display an error.
+A replacement failure never falls back to an unrelated account's built-in report.
+No daemon restart or usage-source registration is required. Removing the surface restores
+the built-in UI. Other hosts keep their existing usage sources.
