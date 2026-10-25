@@ -1,3 +1,4 @@
+import { usePluginUsage } from "./plugin-usage";
 import {
   createContext,
   Fragment,
@@ -36,7 +37,11 @@ import { UsageModal } from "./usage-modal";
 function useUsageSummary(): readonly PinnedUsageSource[] {
   const { t } = useTranslation();
   const { preferences } = useUsagePreferences();
-  const reports = useUsageHostReports(useUsageHostId());
+  const hostId = useUsageHostId();
+  const custom = usePluginUsage(hostId);
+  const reports = useUsageHostReports(
+    custom.match || custom.conflict || custom.unavailable ? null : hostId,
+  );
   return useMemo(() => resolvePinnedUsage(reports, preferences, t), [preferences, reports, t]);
 }
 

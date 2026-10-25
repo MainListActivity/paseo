@@ -223,3 +223,24 @@ describe("PluginRegistry", () => {
     expect(pluginRegistry.getSnapshot()).toEqual([]);
   });
 });
+
+// Replacements own their host through transient disconnect/evaluation failure.
+it("keeps usage ownership offline and clears it only on a successful catalog without the plugin", () => {
+  const usageBundle = bundle("usage").replaceAll('"main"', '"usage"');
+  pluginRegistry.installCatalog("host-a", [{ id: "usage-provider", clientBundle: usageBundle }]);
+  expect(registry.hasConfiguredSurface("host-a", "usage")).toBe(true);
+  pluginRegistry.removeHost("host-a");
+  expect(registry.hasConfiguredSurface("host-a", "usage")).toBe(true);
+  pluginRegistry.installCatalog("host-a", [
+    { id: "usage-provider", clientBundle: '({default(){throw Error("broken")}})' },
+  ]);
+  expect(registry.hasConfiguredSurface("host-a", "usage")).toBe(true);
+  let notified = false;
+  const off = registry.subscribe(() => {
+    notified = true;
+  });
+  pluginRegistry.installCatalog("host-a", []);
+  expect(registry.hasConfiguredSurface("host-a", "usage")).toBe(false);
+  expect(notified).toBe(true);
+  off();
+});

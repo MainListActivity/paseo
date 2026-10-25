@@ -752,3 +752,24 @@ Existing plugin authors should follow the standalone [v0.8 runtime-entry migrati
 See `plugin-examples/local-plugin` for a native surface, `plugin-examples/linear` for a complete
 attachment-source example, `plugin-examples/timeline-items` for timeline projection, and
 `plugin-examples/catppuccin` for a theme.
+
+## Replace host usage
+
+A trusted plugin may register a surface with id `usage` to replace the host's usage modal,
+settings usage section, and agent usage details. Agent details supply `params.agentId`;
+without it the surface renders global usage. It receives the installation's RPC, query,
+navigation and theme context. The built-in pinned quota summary is suppressed for this host.
+Exactly one replacement is allowed per host; conflicting replacements display an error.
+A replacement failure never falls back to an unrelated account's built-in report.
+No daemon restart or usage-source registration is required. Removing the surface restores
+the built-in UI. Other hosts keep their existing usage sources.
+
+For a local custom desktop client, run `node scripts/publish-local-frontend.mjs --install`
+from the exact fork/main commit. It builds the renderer itself, verifies the source stayed
+unchanged, records a hash of the complete artifact, and creates an immutable
+renderer release, clones the compatible installed app, installs the renderer into that clone,
+and signs the custom app locally. It verifies the staged bundle before replacing the app;
+the original bundle is kept under `native-client/backups`. It never changes the inode of a
+running executable and never restarts the daemon. Reload the renderer to load the new UI.
+The official updater can replace this custom client; rebuild from a compatible source version
+after an official update. A version mismatch fails before staging the app.

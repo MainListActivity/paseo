@@ -1,3 +1,4 @@
+import { PluginUsage, usePluginUsage } from "./plugin-usage";
 import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
@@ -11,7 +12,21 @@ import type { UsageReportEntry } from "./types";
  * report as it streams in, without pins. Nothing on hosts that cannot report usage, or for an
  * agent with no account to report.
  */
-export function AgentUsage({
+export function AgentUsage(props: { serverId: string; agentId: string; refreshable: boolean }) {
+  const resolution = usePluginUsage(props.serverId);
+  if (resolution.match || resolution.conflict || resolution.unavailable)
+    return (
+      <PluginUsage
+        key={`${props.serverId}:${props.agentId}`}
+        resolution={resolution}
+        serverId={props.serverId}
+        agentId={props.agentId}
+      />
+    );
+  return <BuiltinAgentUsage {...props} />;
+}
+
+function BuiltinAgentUsage({
   serverId,
   agentId,
   refreshable,

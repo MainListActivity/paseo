@@ -1,3 +1,5 @@
+import { PluginUsage, usePluginUsage } from "./plugin-usage";
+import { HostFilter } from "@/components/hosts/host-filter";
 import { useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { View } from "react-native";
@@ -9,6 +11,7 @@ import { useUsageHostSelection } from "./hosts";
 import type { UsageHost } from "./model";
 import { UsageBody, UsageMessage } from "./usage-section";
 
+const CUSTOM_BODY_STYLE = { flex: 1, minHeight: 0 };
 interface UsageModalProps {
   visible: boolean;
   onClose: () => void;
@@ -23,6 +26,19 @@ interface UsageModalProps {
 export function UsageModal(props: UsageModalProps) {
   const { t } = useTranslation();
   const { serverId, connectedHosts, select } = useUsageHostSelection();
+  const resolution = usePluginUsage(serverId);
+  const customActions = useMemo(
+    () =>
+      serverId ? (
+        <HostFilter
+          hosts={connectedHosts}
+          selectedHost={serverId}
+          onSelectHost={select}
+          includeAllHost={false}
+        />
+      ) : null,
+    [serverId, connectedHosts, select],
+  );
   if (!serverId) {
     return (
       <UsageModalFrame {...props}>
@@ -30,6 +46,12 @@ export function UsageModal(props: UsageModalProps) {
       </UsageModalFrame>
     );
   }
+  if (resolution.match || resolution.conflict || resolution.unavailable)
+    return (
+      <UsageModalFrame {...props} custom actions={customActions}>
+        <PluginUsage key={serverId} resolution={resolution} serverId={serverId} />
+      </UsageModalFrame>
+    );
   // Keyed by host so a refresh in flight on one host never shows on another's cards.
   return (
     <HostUsageModal
@@ -72,8 +94,9 @@ function UsageModalFrame({
   onClose,
   onDismiss,
   actions,
+  custom = false,
   children,
-}: UsageModalProps & { actions?: ReactNode; children: ReactNode }) {
+}: UsageModalProps & { actions?: ReactNode; custom?: boolean; children: ReactNode }) {
   const { t } = useTranslation();
   const title = t(builtinSidebarNavLabelKey("usage"));
   const header = useMemo(() => ({ title, actions }), [actions, title]);
@@ -83,11 +106,14 @@ function UsageModalFrame({
       visible={visible}
       onClose={onClose}
       onDismiss={onDismiss}
-      desktopMaxWidth={640}
+      desktopMaxWidth={custom ? 1100 : 640}
+      scrollable={!custom}
       contextBridge={null}
       testID="usage-modal"
     >
-      <View testID="usage-modal-body">{children}</View>
+      <View style={custom ? CUSTOM_BODY_STYLE : undefined} testID="usage-modal-body">
+        {children}
+      </View>
     </AdaptiveModalSheet>
   );
 }
