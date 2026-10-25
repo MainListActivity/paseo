@@ -14,6 +14,12 @@ import type { InstalledPlugin } from "./types";
 type CatalogPlugin = Awaited<ReturnType<DaemonClient["getPluginCatalog"]>>[number];
 
 export class PluginRegistry {
+  private readonly configuredSurfaces = new Map<string, Map<string, string>>();
+
+  hasConfiguredSurface(serverId: string, surfaceId: string): boolean {
+    return this.configuredSurfaces.get(serverId)?.has(surfaceId) ?? false;
+  }
+
   private readonly byHost = new Map<string, InstalledPlugin[]>();
   private readonly listeners = new Set<() => void>();
   private snapshot: InstalledPlugin[] = [];
@@ -145,8 +151,10 @@ export class PluginRegistry {
         this.evaluationErrors.delete(key);
       }
     }
+    const surfacesChanged = this.updateConfiguredSurfaces({ serverId, catalog, installed });
     this.byHost.set(serverId, installed);
     if (
+      surfacesChanged ||
       installed.length !== catalog.length ||
       installed.length !== previous.length ||
       installed.some((plugin, index) => plugin !== previous[index])
@@ -160,6 +168,35 @@ export class PluginRegistry {
       previousTimelineBundles.length !== installedTimelineBundles.length ||
       previousTimelineBundles.some((bundle, index) => bundle !== installedTimelineBundles[index])
     );
+  }
+
+  private updateConfiguredSurfaces({
+    serverId,
+    catalog,
+    installed,
+  }: {
+    serverId: string;
+    catalog: CatalogPlugin[];
+    installed: InstalledPlugin[];
+  }): boolean {
+    // Keep replacement ownership through disconnects and failed evaluations. Only a
+    // successful catalog without that contribution authorizes restoring built-ins.
+    const surfaces = new Map<string, string>();
+    for (const plugin of installed)
+      for (const surface of plugin.surfaces) surfaces.set(surface.id, plugin.id);
+    for (const [surfaceId, pluginId] of this.configuredSurfaces.get(serverId) ?? []) {
+      if (
+        catalog.some((entry) => entry.id === pluginId) &&
+        this.evaluationErrors.has(`${serverId}/${pluginId}`)
+      )
+        surfaces.set(surfaceId, pluginId);
+    }
+    const previousSurfaces = this.configuredSurfaces.get(serverId);
+    const surfacesChanged =
+      surfaces.size !== (previousSurfaces?.size ?? 0) ||
+      [...surfaces].some(([id, owner]) => previousSurfaces?.get(id) !== owner);
+    this.configuredSurfaces.set(serverId, surfaces);
+    return surfacesChanged;
   }
 
   removeHost(serverId: string): void {

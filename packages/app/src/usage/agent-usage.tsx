@@ -14,9 +14,14 @@ import type { UsageReportEntry } from "./types";
  */
 export function AgentUsage(props: { serverId: string; agentId: string; refreshable: boolean }) {
   const resolution = usePluginUsage(props.serverId);
-  if (resolution.match || resolution.conflict)
+  if (resolution.match || resolution.conflict || resolution.unavailable)
     return (
-      <PluginUsage resolution={resolution} serverId={props.serverId} agentId={props.agentId} />
+      <PluginUsage
+        key={`${props.serverId}:${props.agentId}`}
+        resolution={resolution}
+        serverId={props.serverId}
+        agentId={props.agentId}
+      />
     );
   return <BuiltinAgentUsage {...props} />;
 }

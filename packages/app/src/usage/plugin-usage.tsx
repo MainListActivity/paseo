@@ -3,8 +3,9 @@ import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Text } from "react-native";
 import { withUnistyles } from "react-native-unistyles";
+import { useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useIsCompactFormFactor } from "@/constants/layout";
-import { useInstalledPlugins } from "@/plugins/registry";
+import { pluginRegistry, useInstalledPlugins } from "@/plugins/registry";
 import { PluginInstallationProvider } from "@/plugins/installation-provider";
 import { usePluginHostNavigation } from "@/plugins/host-navigation";
 import { resolvePluginPlatform } from "@/plugins/platform";
@@ -14,7 +15,14 @@ import type { Theme } from "@/styles/theme";
 import { resolvePluginUsage } from "./plugin-usage-model";
 
 export function usePluginUsage(serverId: string | null) {
-  return resolvePluginUsage(useInstalledPlugins(), serverId);
+  const resolution = resolvePluginUsage(useInstalledPlugins(), serverId);
+  const connected = useHostRuntimeIsConnected(serverId ?? "");
+  return {
+    ...resolution,
+    unavailable:
+      !!serverId &&
+      (!connected || (!resolution.match && pluginRegistry.hasConfiguredSurface(serverId, "usage"))),
+  };
 }
 
 type Resolution = ReturnType<typeof usePluginUsage>;
@@ -28,6 +36,8 @@ export function PluginUsage({
   serverId: string;
   agentId?: string;
 }) {
+  if (resolution.unavailable)
+    return <Text>用量来源暂不可用，等待此主机或插件恢复；不会切换到其他账号。</Text>;
   if (resolution.conflict) return <Text>多个插件同时接管用量，请保留一个 usage 页面。</Text>;
   if (!resolution.match) return null;
   return (

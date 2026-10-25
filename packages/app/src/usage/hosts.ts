@@ -1,3 +1,4 @@
+import { pluginRegistry, useInstalledPlugins } from "@/plugins/registry";
 import { useCallback, useMemo } from "react";
 import { useAppSettings } from "@/hooks/use-settings";
 import {
@@ -31,7 +32,12 @@ function useUsageHostChoice(): UsageHostChoice {
 
 /** The host the sidebar Usage row reads, or null when none reports usage. */
 export function useUsageHostId(): string | null {
-  return resolveUsageHostId(useUsageHostChoice());
+  useInstalledPlugins();
+  const choice = useUsageHostChoice();
+  const selected = choice.pickedServerId ?? choice.activeServerId;
+  return selected && pluginRegistry.hasConfiguredSurface(selected, "usage")
+    ? selected
+    : resolveUsageHostId(choice);
 }
 
 /**
@@ -45,6 +51,7 @@ export function useUsageHostSelection(): {
 } {
   const { updateSettings } = useAppSettings();
   const choice = useUsageHostChoice();
+  useInstalledPlugins();
   const connectedHosts = useMemo(
     () => choice.hosts.filter((host) => host.isConnected),
     [choice.hosts],
@@ -55,5 +62,10 @@ export function useUsageHostSelection(): {
     },
     [updateSettings],
   );
-  return { serverId: resolveUsageModalHostId(choice), connectedHosts, select };
+  const selected = choice.pickedServerId ?? choice.activeServerId;
+  const serverId =
+    selected && pluginRegistry.hasConfiguredSurface(selected, "usage")
+      ? selected
+      : resolveUsageModalHostId(choice);
+  return { serverId, connectedHosts, select };
 }

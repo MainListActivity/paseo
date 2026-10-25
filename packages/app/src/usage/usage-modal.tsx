@@ -46,10 +46,10 @@ export function UsageModal(props: UsageModalProps) {
       </UsageModalFrame>
     );
   }
-  if (resolution.match || resolution.conflict)
+  if (resolution.match || resolution.conflict || resolution.unavailable)
     return (
       <UsageModalFrame {...props} custom actions={customActions}>
-        <PluginUsage resolution={resolution} serverId={serverId} />
+        <PluginUsage key={serverId} resolution={resolution} serverId={serverId} />
       </UsageModalFrame>
     );
   // Keyed by host so a refresh in flight on one host never shows on another's cards.

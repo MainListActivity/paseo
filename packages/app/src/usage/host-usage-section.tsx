@@ -7,8 +7,8 @@ import { UsageSection } from "./usage-section";
 /** A host's usage reports, for its settings page. */
 export function HostUsageSection({ serverId }: { serverId: string }) {
   const resolution = usePluginUsage(serverId);
-  if (resolution.match || resolution.conflict)
-    return <PluginUsage resolution={resolution} serverId={serverId} />;
+  if (resolution.match || resolution.conflict || resolution.unavailable)
+    return <PluginUsage key={serverId} resolution={resolution} serverId={serverId} />;
   return <BuiltinHostUsageSection serverId={serverId} />;
 }
 
