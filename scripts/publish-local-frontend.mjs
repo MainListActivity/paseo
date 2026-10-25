@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 /** Publish a main-built renderer without restarting the desktop app or its daemon. */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, cpSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  readdirSync,
+  cpSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -13,8 +21,6 @@ if (git("rev-parse", "fork/main") !== sha)
   throw Error("Build and publish the exact fork/main commit.");
 git("diff", "--exit-code", "HEAD");
 const dist = join(repo, "packages/app/dist");
-if (!existsSync(join(dist, "index.html")))
-  throw Error("Run the production electron web export from main first.");
 const app = "/Applications/Paseo.app";
 const version = execFileSync(
   "/usr/libexec/PlistBuddy",
@@ -29,6 +35,38 @@ if (version !== sourceVersion)
 const home = join(homedir(), "Library/Application Support/SurrealCKCompany");
 const release = join(home, "native-client/releases", sha);
 if (existsSync(release)) throw Error("This immutable frontend release already exists.");
+const buildEnv = {
+  ...process.env,
+  PASEO_WEB_PLATFORM: "electron",
+  NODE_OPTIONS: "--max-old-space-size=4096",
+};
+execFileSync("npm", ["run", "build:app-deps"], { cwd: repo, env: buildEnv, stdio: "inherit" });
+execFileSync(
+  "npm",
+  [
+    "exec",
+    "--workspace=@getpaseo/app",
+    "--",
+    "expo",
+    "export",
+    "--platform",
+    "web",
+    "--max-workers",
+    "2",
+  ],
+  { cwd: repo, env: buildEnv, stdio: "inherit" },
+);
+if (git("rev-parse", "HEAD") !== sha) throw Error("Source changed while building.");
+git("diff", "--exit-code", "HEAD");
+const files = readdirSync(dist, { recursive: true, withFileTypes: true })
+  .filter((entry) => entry.isFile())
+  .map((entry) => join(entry.parentPath, entry.name))
+  .sort();
+const artifactHash = createHash("sha256");
+for (const file of files) {
+  artifactHash.update(file.slice(dist.length + 1));
+  artifactHash.update(readFileSync(file));
+}
 mkdirSync(release, { recursive: true });
 cpSync(dist, join(release, "app-dist"), { recursive: true });
 const manifest = {
@@ -36,6 +74,7 @@ const manifest = {
   sha,
   version,
   at: new Date().toISOString(),
+  artifactHash: artifactHash.digest("hex"),
   indexHash: createHash("sha256")
     .update(readFileSync(join(dist, "index.html")))
     .digest("hex"),

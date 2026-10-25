@@ -764,8 +764,9 @@ A replacement failure never falls back to an unrelated account's built-in report
 No daemon restart or usage-source registration is required. Removing the surface restores
 the built-in UI. Other hosts keep their existing usage sources.
 
-For a local custom desktop client, build the electron web export from the exact fork/main
-commit, then run `node scripts/publish-local-frontend.mjs --install`. It creates an immutable
+For a local custom desktop client, run `node scripts/publish-local-frontend.mjs --install`
+from the exact fork/main commit. It builds the renderer itself, verifies the source stayed
+unchanged, records a hash of the complete artifact, and creates an immutable
 renderer release, clones the compatible installed app, installs the renderer into that clone,
 and signs the custom app locally. It verifies the staged bundle before replacing the app;
 the original bundle is kept under `native-client/backups`. It never changes the inode of a
